@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mic Bridge</title>
+<style>
+  :root {
+    --brand-navy: #1E2A47;
+    --brand-teal: #0F8B8D;
+    --brand-teal-dark: #0B6C6E;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%; margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--brand-navy);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .wrap { text-align: center; padding: 24px; width: 100%; max-width: 320px; }
+  .orb {
+    width: 72px; height: 72px; margin: 0 auto 16px; border-radius: 50%;
+    background: var(--brand-teal); display: flex; align-items: center; justify-content: center;
+    font-size: 30px; position: relative;
+  }
+  .orb.listening { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(15,139,141,0.55); }
+    70%  { box-shadow: 0 0 0 18px rgba(15,139,141,0); }
+    100% { box-shadow: 0 0 0 0 rgba(15,139,141,0); }
+  }
+  #status { font-weight: 600; margin-bottom: 6px; font-size: 15px; }
+  #transcript { min-height: 40px; font-size: 13px; color: #cfd8e8; margin-bottom: 16px; word-wrap: break-word; }
+  button {
+    border: none; border-radius: 8px; padding: 10px 18px; font-size: 14px; font-weight: 600;
+    cursor: pointer; background: var(--brand-teal); color: #fff;
+  }
+  button:hover { background: var(--brand-teal-dark); }
+  button.secondary { background: transparent; border: 1px solid rgba(255,255,255,0.35); }
+  .hint { font-size: 11px; color: #9aa6bb; margin-top: 14px; line-height: 1.4; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="orb" id="orb">🎙️</div>
+    <div id="status">Starting…</div>
+    <div id="transcript"></div>
+    <button id="actionBtn" style="display:none;"></button>
+    <div class="hint">This window handles the microphone because Apps Script blocks direct mic access. It's safe to leave open — it will close itself when done.</div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---- Read config passed from the opener (see MIC_BRIDGE_URL usage in JavaScript.html) ----
+  const params = new URLSearchParams(location.search);
+  const lang = params.get('lang') || 'en-US';
+  const interim = params.get('interim') === '1';
+
+  const orbEl = document.getElementById('orb');
+  const statusEl = document.getElementById('status');
+  const transcriptEl = document.getElementById('transcript');
+  const actionBtn = document.getElementById('actionBtn');
+
+  // Popup->opener messages use '*' because the opener's exact origin (an Apps
+  // Script exec URL, or a custom domain wrapping it) can vary and isn't known
+  // to this page. Only recognized speech text is sent — nothing sensitive.
+  function postToOpener(msg) {
+    if (window.opener) {
+      try { window.opener.postMessage(msg, '*'); } catch (e) { /* opener gone */ }
+    }
+  }
+
+  function closeSoon(delay) {
+    setTimeout(() => { window.close(); }, delay || 500);
+  }
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    statusEl.textContent = 'Not supported here';
+    transcriptEl.textContent = 'This browser doesn\'t support voice dictation.';
+    postToOpener({ type: 'speech-bridge:error', error: 'not-supported' });
+    postToOpener({ type: 'speech-bridge:end' });
+    closeSoon(1800);
+    return;
+  }
+
+  let recognition = null;
+  let manuallyStopped = false;
+
+  function startRecognition() {
+    actionBtn.style.display = 'none';
+    recognition = new SpeechRecognition();
+    recognition.lang = lang;
+    recognition.interimResults = interim;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      orbEl.classList.add('listening');
+      statusEl.textContent = 'Listening…';
+      transcriptEl.textContent = '';
+      postToOpener({ type: 'speech-bridge:start' });
+    };
+
+    recognition.onresult = (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const result = e.results[i];
+        const transcript = result[0].transcript;
+        transcriptEl.textContent = transcript;
+        postToOpener({ type: 'speech-bridge:result', transcript: transcript, isFinal: !!result.isFinal });
+      }
+    };
+
+    recognition.onerror = (e) => {
+      postToOpener({ type: 'speech-bridge:error', error: e.error });
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        statusEl.textContent = 'Microphone blocked';
+        transcriptEl.textContent = 'Allow the microphone for this page, then click the mic button again in the app.';
+      } else if (e.error === 'no-speech') {
+        statusEl.textContent = 'Didn\u2019t catch that';
+      } else {
+        statusEl.textContent = 'Error: ' + e.error;
+      }
+    };
+
+    recognition.onend = () => {
+      orbEl.classList.remove('listening');
+      postToOpener({ type: 'speech-bridge:end' });
+      if (manuallyStopped) {
+        statusEl.textContent = 'Stopped';
+      } else {
+        statusEl.textContent = 'Done';
+      }
+      closeSoon(600);
+    };
+
+    try {
+      recognition.start();
+    } catch (err) {
+      // start() can throw synchronously (rare — e.g. no user-activation carried
+      // over into the popup). Fall back to a manual button, which always
+      // carries its own fresh activation.
+      showManualStart();
+    }
+  }
+
+  function showManualStart() {
+    statusEl.textContent = 'Tap to start';
+    transcriptEl.textContent = '';
+    actionBtn.textContent = 'Start listening';
+    actionBtn.style.display = 'inline-block';
+    actionBtn.onclick = startRecognition;
+  }
+
+  // Let the opener cancel a listening session (e.g. user clicked the mic
+  // button again to stop, or closed the HUD).
+  window.addEventListener('message', (event) => {
+    const data = event.data || {};
+    if (data.type === 'speech-bridge:stop') {
+      manuallyStopped = true;
+      if (recognition) recognition.stop();
+      else closeSoon(50);
+    }
+  });
+
+  // If the user closes this popup manually mid-listen, there's nothing more
+  // to do — the opener detects the closed window on its own (see
+  // BridgedSpeechRecognition's poll in JavaScript.html).
+  startRecognition();
+})();
+</script>
+</body>
+</html>
