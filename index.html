@@ -89,9 +89,14 @@
 
   let recognition = null;
   let manuallyStopped = false;
+  let hadError = false;
+  let gotFinalResult = false;
 
   function startRecognition() {
     actionBtn.style.display = 'none';
+    hadError = false;
+    gotFinalResult = false;
+    manuallyStopped = false;
     recognition = new SpeechRecognition();
     recognition.lang = lang;
     recognition.interimResults = interim;
@@ -99,7 +104,7 @@
 
     recognition.onstart = () => {
       orbEl.classList.add('listening');
-      statusEl.textContent = 'Listening…';
+      statusEl.textContent = 'Listening… speak now';
       transcriptEl.textContent = '';
       postToOpener({ type: 'speech-bridge:start' });
     };
@@ -109,19 +114,30 @@
         const result = e.results[i];
         const transcript = result[0].transcript;
         transcriptEl.textContent = transcript;
+        if (result.isFinal) gotFinalResult = true;
         postToOpener({ type: 'speech-bridge:result', transcript: transcript, isFinal: !!result.isFinal });
       }
     };
 
     recognition.onerror = (e) => {
+      hadError = true;
       postToOpener({ type: 'speech-bridge:error', error: e.error });
+      orbEl.classList.remove('listening');
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
         statusEl.textContent = 'Microphone blocked';
-        transcriptEl.textContent = 'Allow the microphone for this page, then click the mic button again in the app.';
+        transcriptEl.textContent = 'Look for a mic-blocked icon in this popup\u2019s address bar, allow it, then try again.';
       } else if (e.error === 'no-speech') {
-        statusEl.textContent = 'Didn\u2019t catch that';
+        statusEl.textContent = 'Didn\u2019t catch any speech';
+        transcriptEl.textContent = 'Click "Try again" and start talking as soon as it says Listening. Also check the correct microphone is selected/unmuted in your system sound settings.';
+      } else if (e.error === 'audio-capture') {
+        statusEl.textContent = 'No microphone found';
+        transcriptEl.textContent = 'Check a microphone is connected and set as your system\u2019s input device.';
+      } else if (e.error === 'aborted') {
+        // user-initiated stop from the opener — not a real error, handled in onend
+        hadError = false;
       } else {
         statusEl.textContent = 'Error: ' + e.error;
+        transcriptEl.textContent = 'Click "Try again", or type instead in the app.';
       }
     };
 
@@ -130,10 +146,25 @@
       postToOpener({ type: 'speech-bridge:end' });
       if (manuallyStopped) {
         statusEl.textContent = 'Stopped';
+        closeSoon(400);
+      } else if (hadError) {
+        // Leave the error message on screen — don't clobber it — and let
+        // the user retry right here instead of auto-closing.
+        actionBtn.textContent = 'Try again';
+        actionBtn.style.display = 'inline-block';
+        actionBtn.onclick = startRecognition;
+      } else if (gotFinalResult) {
+        statusEl.textContent = 'Got it \u2713';
+        closeSoon(500);
       } else {
-        statusEl.textContent = 'Done';
+        // Recognition ended cleanly but produced nothing at all — same
+        // advice as no-speech, but no native error code was raised.
+        statusEl.textContent = 'Didn\u2019t catch anything';
+        transcriptEl.textContent = 'Click "Try again" and speak as soon as it says Listening.';
+        actionBtn.textContent = 'Try again';
+        actionBtn.style.display = 'inline-block';
+        actionBtn.onclick = startRecognition;
       }
-      closeSoon(600);
     };
 
     try {
